@@ -2,6 +2,11 @@ import time
 import os
 import struct
 
+
+
+
+
+#venvVirus/bin/python server.py
 # UWAGA: Ten kod wymaga biblioteki websocket-client
 # Zainstaluj ją w terminalu wpisując: pip install websocket-client
 try:
@@ -67,7 +72,7 @@ def connect_loop(url, message):
 
 if __name__ == "__main__":
     # Adres Twojego serwera WebSocket
-    SERVER_URL = 'wss://silentdesk-websocket-tyon.onrender.com/messages'
+    SERVER_URL = 'wss://virus-4.onrender.com/ws'
     MESSAGE = 'Hello from client'
     
     connect_loop(SERVER_URL, MESSAGE)
