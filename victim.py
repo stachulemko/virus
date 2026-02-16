@@ -9,6 +9,7 @@ import threading
 import select
 import sys
 
+
 # ─── Tryb ukryty ────────────────────────────────────────────────
 # Przekieruj stdout/stderr do /dev/null żeby nic nie wyświetlać
 if not sys.stdout or not sys.stdout.isatty():
