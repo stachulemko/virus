@@ -9,14 +9,44 @@ import os
 import time
 import platform
 
-# Ścieżka do victim.py (obok watchdoga)
-VICTIM_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "victim.py")
-RESTART_DELAY = 3  # sekundy przed restartem po crashu
-PYTHON = sys.executable  # ten sam interpreter co watchdog
+# Ścieżka do victim.py
+if getattr(sys, 'frozen', False):
+    # Jeśli skompilowane do EXE (PyInstaller)
+    base_path = sys._MEIPASS
+    # Jeśli victim.exe został dodany jako --add-data, znajdziemy go w _MEIPASS
+    # Nazwa pliku zależy od systemu - na Windows .exe, na Linux bez
+    ext = ".exe" if platform.system() == "Windows" else ""
+    VICTIM_SCRIPT = os.path.join(base_path, "victim" + ext)
+    EXECUTABLE = VICTIM_SCRIPT # Uruchamiamy bezpośrednio plik binarny
+else:
+    # Tryb skryptu
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    VICTIM_SCRIPT = os.path.join(base_path, "victim.py")
+    EXECUTABLE = sys.executable # Uruchamiamy python
 
+RESTART_DELAY = 3  # sekundy przed restartem po crashu
+
+def ensure_executable(path):
+    """Make sure the file is executable on Linux/Mac."""
+    if platform.system() != "Windows":
+        st = os.stat(path)
+        os.chmod(path, st.st_mode | 0o111)
 
 def run_victim():
     """Uruchamia victim.py jako ukryty subprocess i czeka aż się zakończy."""
+    
+    # Upewnij się, że plik jest wykonywalny (ważne po rozpakowaniu z onefile na Linux)
+    if getattr(sys, 'frozen', False):
+        try:
+            ensure_executable(EXECUTABLE)
+        except Exception:
+            pass
+
+    # Budowanie komendy
+    args = [EXECUTABLE]
+    if not getattr(sys, 'frozen', False):
+        args.append(VICTIM_SCRIPT)
+        
     kwargs = dict(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -31,7 +61,7 @@ def run_victim():
         si.wShowWindow = 0
         kwargs["startupinfo"] = si
 
-    proc = subprocess.Popen([PYTHON, VICTIM_SCRIPT], **kwargs)
+    proc = subprocess.Popen(args, **kwargs)
     proc.wait()  # blokuje aż victim się zakończy
     return proc.returncode
 
